@@ -1,0 +1,551 @@
+import sys
+import time
+import random
+import heapq
+import signal
+import os
+import csv
+import timeit
+
+config(channel is fifo, clock is lamport)
+
+
+class StatMonitor(process):
+
+    def setup(totalRuns:int ,algo):
+        self.curRun = 0
+        self.sendQueue = None
+        self.csQueue = None
+        self.startTest = None
+        self.parent = None
+        self.startTest = False
+        self.totalProcs = None
+        self.totalRequests = None
+
+        print("Monitor is setup for algorithm: ", algo)
+
+# We must bind the start and end calls to a parent process. As only parent should
+# have the priviledge to start/end monitoring services
+    def receive(msg= ('startTest', nprocs, nreqs ,tnum, p)):
+        print("Monitor:: Recieved startTest command for test number: ", tnum)
+        startTest = True
+        curRun = curRun + 1
+        assert(tnum == curRun)
+        totalProcs = nprocs
+        totalRequests = nreqs
+        print(totalRequests)
+        parent = p
+        csQueue = []
+        sendQueue = []
+
+
+    def receive(msg= ('endTest', tnum, p)):
+        if p != parent:
+            return
+        #print("Monitor:: Recieved endTest command")
+        assert(tnum == curRun)
+        endTest = True
+        startTest = False
+        validate()
+        reset()
+
+    def receive(msg= ('send', c, p)):
+        #print("Monitor:: Recieved send command timestamped: ", c)
+        heapq.heappush(sendQueue,(c, p, 'send'))  
+
+    def receive(msg= ('enterCS', c, p)):
+        #print("Monitor:: Recieved enterCS command timestamped: ", c)
+        heapq.heappush(csQueue,(c, p,'enterCS'))
+
+    def receive(msg= ('exitCS', c, p)):
+        #print("Monitor:: Recieved exitCS command timestamped: ", c)
+        heapq.heappush(csQueue,(c, p,'exitCS'))
+
+    def reset():
+        self.curRun = 0
+        self.sendQueue = None
+        self.csQueue = None
+        self.startTest = None
+        self.parent = None
+        self.startTest = False
+##  This function iterates over the entire history of messages collected by the monitor 
+##  process and chacks if there has been a condition where more than one process are in 
+##  critical section based on the Lamport's clock value and CS request ordering in the 
+##  CS request queue 
+    def validate_safety():
+        length = len(csQueue)
+        
+        if(length&1):
+            return False;
+
+        prevclk = None
+        prevps = None
+        for idx in range(0,length):
+            if(idx&1):
+                clk , ps, tag = heapq.heappop(csQueue)
+                if prevclk > clk or tag != 'exitCS' or ps != prevps:
+                    return False
+            else:
+                prevclk,prevps,prevtag = heapq.heappop(csQueue)
+                if(prevtag != 'enterCS'):
+                    return False;
+        return True
+
+
+    def validate_liveliness():
+        # if there is a deadlock we output it in the file and just kill the processes from the signal handler
+        # and expect for a restart.
+        # if this call is made then for sure the process is not in deadlock
+        return True
+
+    def validate():
+        ## 1. Check for safety
+        ## 2. Check for liveliness
+        #print("------Send Queue------")
+        heapq.heapify(sendQueue)
+        #print(sendQueue)
+        #print("------Send Queue------")
+        #print("-------CS Queue------")
+        heapq.heapify(csQueue)
+        #print(csQueue)
+        #print("--------CS Queue------")
+        sResult = validate_safety()
+        lResult = validate_liveliness()
+
+        print("**************Safety Result for TC:     ",curRun, " ", sResult,"******************")
+        print("**************Liveliness Result for TC: ",curRun, " ", lResult,"******************")
+        with open('Correctness.csv', mode='a') as corr_file:
+            writer = csv.writer(corr_file)
+            writer.writerow([curRun,totalProcs,totalRequests,sResult,lResult])
+
+    def deadlock_handler(signum, frame):
+        output("LIVELINESS FAILED :: DeadLock detected")
+        with open('Correctness.csv', mode='a') as corr_file:
+            writer = csv.writer(corr_file)
+            writer.writerow([curRun,totalProcs,totalRequests,False,False])
+        os.kill(os.getppid(), signal.SIGTERM)
+
+
+    def wait_wrapper():
+        signal.signal(signal.SIGALRM, deadlock_handler)
+        signal.alarm(30)
+        await(received(('done',), from_=parent))
+        signal.alarm(0)
+
+# Checking for various properties of algorithm code goes in here..
+# Output results in a form of a table/csv format
+
+    def run():
+        print("Monitor Process is running")
+        wait_wrapper()
+        -- yield2
+        if curRun == totalRuns:
+            output("MONITOR :: Shutting Down!")
+            send(('terminate', algo, self), to=parent)
+        else:
+            print("Sanity is broken...BEWARE!!!")
+            
+
+# We have recieved the request to start Test now.
+        
+
+class OrigP(process):
+    def setup(s:set, nrequests:int, monitor:Monitor = None):  # s is set of all other processes
+        self.q = set()
+        self.monitor = monitor
+
+    def mutex(task):
+        -- request
+        c = logical_clock()
+
+        send(('request', c, self), to= s)
+        q.add(('request', c, self))
+        await(each(('request', c2, p) in q,
+                   has= (c2, p)==(c, self) or (c, self) < (c2, p)) and
+              each(p in s, has= some(received(('ack', c2, _p)), has= c2 > c)))
+        -- critical_section
+        task()
+        -- release
+        q.remove(('request', c, self))
+        send(('release', logical_clock(), self), to= s)
+
+    def receive(msg= ('request', c2, p)):
+        q.add(('request', c2, p)) 
+        send(('ack', logical_clock(), self), to= p)
+
+    def receive(msg= ('release', _, p)):
+#        q.remove(('request', _, p))  # pattern matching needed for _
+#        q.remove(anyof(setof(('request', c, p), ('request', c, _p) in q)))
+        for x in setof(('request', c, p), ('request', c, _p) in q): 
+            q.remove(x)
+            break
+#        for ('request', c, _p) in q: q.remove('request', c, p); break
+#        for (tag, c, p2) in q:
+#            if tag == 'request' and p2 == p:
+#                q.remove((tag, c, p2)); break
+
+    def run():
+        def task():
+            output('in cs')
+        for i in range(nrequests):
+            mutex(task)
+
+        send(('done', self), to= parent())
+        await(received(('done',), from_=parent()))
+        output('terminating')
+
+class SpecP(process):
+
+    def setup(s:set, nrequests:int, monitor:Monitor=None): # s is set of all other processes
+        self.monitor = monitor 
+
+    def mutex(task):
+        -- request
+        c = logical_clock()
+        if monitor != None:
+            send(('send', logical_clock(), self), to= monitor)
+        send(('request', c, self), to= s)
+        await(each(received(('request', c2, p)),
+                   has= received(('release', c2, p)) or (c, self) < (c2, p)) 
+              and each(p in s, has= received(('ack', c, p))))
+        -- critical_section
+        
+        if monitor != None:
+            send(('enterCS', logical_clock(), self), to= monitor)
+        task()
+        
+        -- release
+        if monitor != None:
+            send(('exitCS', logical_clock(), self), to= monitor)
+        send(('release', c, self), to= s)
+
+    def receive(msg= ('request', c, p)):
+        send(('ack', c, self), to= p)
+
+    def run():
+        def task():
+            output('in cs')
+            output('releasing cs')
+        for i in range(nrequests):
+            mutex(task)
+
+        send(('done', self), to= s)
+        await(each(p in s, has= received(('done', p))))
+        
+        send(('done', self), to= parent())
+        await(received(('done',), from_=parent()))
+        output('terminating')
+
+
+
+class MainP(process):
+    
+    def setup(s:set, nrequests:int, monitor:Monitor = None):  # s is set of all other processes
+        self.q = set()
+        self.requestsToSend = nrequests
+        self.requestsToProcess = 0
+        self.requestsToRelease = 0
+
+#############################################################################################
+##  As per Lamport's RULE 5: Process Pi is granted a resource when 
+##  (i)  There is a Tm:Pi requests resource message in its request queue which is ordered 
+##       before any other request in its queue
+##  (ii) Pi has received a message from every other process time-stamped later than Tm
+##
+##  The function get_request_to_process() and get_request_to_release()
+##  will act as place holder on deciding the interpretation of 'any' in 
+##  Lamport's clock paper.By changing the implementation of this method, we can have different
+##  implementation of any 'one' in lamport's paper. In the below implemetation the process Pi 
+##  will always release the request which it finished processing rather than any 'one'. 
+##  But, when this request reaches the other processes, there we just remove any 'one' request
+##  of Pi from the queue without checking for the earliest one.                              
+##    
+#############################################################################################
+
+    def get_request_to_process():
+        min = 0xFFFFFFFF
+        req = None
+        for (tag , c, p) in q:
+            if(tag == 'request' and (p == self) and (c < min)):
+               min = c
+               req = ('request', c, self)
+        return req
+
+    def get_request_to_release():
+        min = 0xFFFFFFFF
+        req = None
+        for (tag , c, p) in q:
+            if(tag == 'request' and (p == self) and (c < min)):
+               min = c 
+               req = ('request', c, self)
+        return req 
+
+    def send_request():
+        if requestsToSend > 0:
+            -- request 
+            c = logical_clock()
+            if monitor != None:
+                send(('send', logical_clock(), self), to= monitor)
+            
+            #output("SEND_REQUEST() :: Request generated at clock ", c)
+            send(('request', c, self), to= s)
+            q.add(('request', c, self))
+            requestsToSend = requestsToSend - 1
+            requestsToProcess = requestsToProcess + 1
+
+    def enter_CS(task):
+        --cs
+        if(requestsToProcess > 0):
+            curReq = get_request_to_process()
+            #output("ENTER_CS() :: Wait on current request: ", curReq)
+           
+            if(each(('request', c2, p) in q,
+                has= (c2, p)==(curReq[1], self) or (curReq[1], self) < (c2, p))):
+                   if(each(p in s, has= some(received(('ack', c2, _p)), has= c2 > curReq[1]))):
+                        if monitor != None:
+                            send(('enterCS', logical_clock(), self), to= monitor)
+                        
+                        #output("ENTER_CS() :: Request ", curReq, "is entering CS now at clk = ", logical_clock())
+                        -- critical_section
+                        task()
+                        requestsToProcess = requestsToProcess - 1
+                        requestsToRelease = requestsToRelease + 1
+
+    def release():
+        -- release
+        if(requestsToRelease > 0):
+            curReq = get_request_to_release()
+            q.remove(curReq)
+            if monitor != None:
+                send(('exitCS', logical_clock(), self), to= monitor)
+            #output("RELEASE()  :: ", curReq, " is released  now at clk = ", logical_clock())
+            send(('release', logical_clock(), self), to= s)
+            requestsToRelease = requestsToRelease - 1
+
+    def receive(msg= ('request', c2, p)):
+        #output("Received request message from ", p, "timestamped: ", c2)
+        q.add(('request', c2, p))
+        send(('ack', logical_clock(), self), to= p)
+
+## Note:: Definition of 'any' is now changed to the oldest request that is received from a process Pi,
+##        rather than chosing any 'one'
+
+    def receive(msg= ('release', c1, p)):
+
+        ##Releasing any request from the queue on receiving release request as per 
+    #  ##Lamport's 5 rules. But with this we see both safety and liveliness problem
+
+     #   for x in setof(('request', c, p), ('request', c, _p) in q):
+     #      q.remove(x)
+     #        break
+
+        min = 0xFFFFFFFF
+        req = None
+        for (tag , c, p1) in q:
+            if(tag == 'request' and (p1 == p) and (c < min)):
+                min = c 
+                req = ('request', c, p)
+ 
+        q.remove(req)
+
+        if monitor == None:
+            pass
+            #output("Received release message from ", p," for request timestamped: ", req[1],  "at LC: ", logical_clock())
+
+# Test code for handling Ack messages in handlers as well
+#    def receive(msg= ('ack', c, p)):
+#         output(self," Received ack from ", p)
+#         ackQ.add(('ack', c, p))
+                
+    def run():
+        def task():
+            output('in cs')
+
+        while(requestsToSend or requestsToProcess or requestsToRelease ):
+            send_request()
+            enter_CS(task)
+            release()
+           # output(requestsToSend, requestsToProcess, requestsToRelease)
+        send(('done', self), to= parent())
+        await(received(('done',), from_=parent()))
+        output('terminating')
+
+
+def main():
+    output("---------------------Main Begins-----------------------")
+    nprocs  = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    nreqs   = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    nruns   = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+    nparams = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+    nreps   = int(sys.argv[5]) if len(sys.argv) > 5 else 1
+    algorithms = ('MyLamport','OrigLamport','SpecLamport')
+    perform_correctness = True
+    perform_performance = True
+
+# checkCorrectness for each algorithm and save the statistics in a seperate file
+    if(perform_correctness):
+
+        print("*******************CORRECTNESS VALIDATION START**********************")
+        print("")
+        if os.path.exists("Correctness.csv"):
+            os.remove("Correctness.csv")
+        
+        with open('Correctness.csv', mode='a') as corr_file:
+                writer = csv.writer(corr_file)
+                writer.writerow(["Correctness Comparision w.r.t Algorithms"])
+
+        for algo in algorithms:
+            algoToRun = None
+            resultList = None
+
+            if algo == 'MyLamport' :
+                algoToRun =  MainP
+            elif algo == 'OrigLamport':
+                algoToRun = OrigP
+            elif algo == 'SpecLamport':
+                algoToRun = SpecP
+
+            with open('Correctness.csv', mode='a') as corr_file:
+                writer = csv.writer(corr_file)
+                writer.writerow(["Algorithm: " + algo])
+                writer.writerow(['Run Sequence:', 'Number of Processes', 'Number of Requests', 'Safety', 'Liveliness'])
+            print("*********************************************************************")
+            print ("NumProcs: ", nprocs, " NumRequests: ", nreqs, " Num Runs: ", nruns,)
+            print("*********************************************************************")
+            mp = new(StatMonitor)
+            setup(mp,(nruns,algo))
+            start(mp)
+            for i in range(1,nruns+1):
+               
+                procs = random.randint(1, nprocs)
+                reqs  = random.randint(1, nreqs)
+                print ("Run Seq : ", i, " NumProcs: ", procs, " NumRequests: ", reqs)
+                send(('startTest', procs, reqs, i, self), to= mp)
+                ps = new(algoToRun, num=procs)
+                for p in ps: setup(p, (ps-{p}, reqs, mp))
+                start(ps)
+                await(each(proc in ps, has=received(('done', proc))))
+                send(('done',), to= ps)
+                print (algo,":: Run Seq:: ", i, " Completed!!")
+                send(('endTest', i, self), to= mp)
+            
+            send(('done',), to= mp)
+            await(received(('terminate', algo, mp), from_= mp))
+
+        print("*******************CORRECTNESS VALIDATION ENDS**********************")  
+
+
+    if(perform_performance):
+        if os.path.exists("Performance_varyingReqs.csv"):
+            os.remove("Performance_varyingReqs.csv")
+        if os.path.exists("Performance_varyingProcs.csv"):
+            os.remove("Performance_varyingProcs.csv")
+
+        print("*******************PERFORMANCE VALIDATION STARTS**********************")
+        
+        # Run with varying number of requests first keeping procs = nprocs
+        with open('Performance_varyingReqs.csv', mode='a') as perf1_file:
+            writer = csv.writer(perf1_file)
+            writer.writerow(["Performance Comparision With Varying Requests"])
+
+        for algo in algorithms:
+            algoToRun = None
+            
+            if algo == 'MyLamport' :
+                algoToRun =  MainP
+            elif algo == 'OrigLamport':
+                algoToRun = OrigP
+            elif algo == 'SpecLamport':
+                algoToRun = SpecP
+
+            with open('Performance_varyingReqs.csv', mode='a') as perf1_file:
+                writer = csv.writer(perf1_file)
+                subHeading = "Algorithm: " + algo + "  Procs: " + str(nprocs) + "  Reps: " + str(nreps)
+                writer.writerow([subHeading])
+                writer.writerow(['Run Seq:', 'Number of Requests', 'Execution Time (s)'])
+            procs = nprocs
+            reqs =  dr = (int)(nreqs/nparams)
+            runSeq = 1
+
+            for req in range(reqs, nreqs+1, dr):
+                print("*********************************************************************")
+                print ("Num Runs: ", nreps, " NumProcs: ", procs, " NumRequests: ", reqs)
+                print("*********************************************************************")
+                runTime = 0.0
+                for i in range(1,nreps+1):
+                    ps = new(algoToRun, num=procs)
+                    for p in ps: setup(p, (ps-{p}, reqs))
+                    startTime = timeit.default_timer()
+                    start(ps)
+                    await(each(proc in ps, has=received(('done', proc))))
+                    runTime = runTime + (timeit.default_timer() - startTime)
+                    send(('done',), to= ps)
+                    print (algo, ":: Run Seq:: ", i, " Completed!!")
+                
+                runTime = runTime/nreps
+                with open('Performance_varyingReqs.csv', mode='a') as perf1_file:
+                    writer = csv.writer(perf1_file)
+                    writer.writerow([runSeq, req, runTime])
+
+                runSeq = runSeq + 1
+                #print("Procs: ", procs, " Req: ", req, "RunTime: " , runTime)
+        
+        # Run with varying number of procs first keeping request = nreqs
+        with open('Performance_varyingProcs.csv', mode='a') as perf1_file:
+            writer = csv.writer(perf1_file)
+            writer.writerow(["Performance Comparision With Varying Processes"])
+
+        for algo in algorithms:
+            algoToRun = None
+            
+            if algo == 'MyLamport' :
+                algoToRun =  MainP
+            elif algo == 'OrigLamport':
+                algoToRun = OrigP
+            elif algo == 'SpecLamport':
+                algoToRun = SpecP
+
+            with open('Performance_varyingProcs.csv', mode='a') as perf1_file:
+                writer = csv.writer(perf1_file)
+                subHeading = "Algorithm: " + algo + "  Reqs: " + str(nreqs) + "  Reps: " + str(nreps)
+                writer.writerow([subHeading])
+                writer.writerow(['Run Seq:', 'Number of Processes', 'Execution Time (s)'])
+            procs = dp = int(nprocs/nparams)
+            reqs =  nreqs
+            runSeq = 1
+
+            for procs in range(procs, nprocs+1, dp):
+                print("*********************************************************************")
+                print ("Num Runs: ", nreps, " NumProcs: ", procs, " NumRequests: ", reqs)
+                print("*********************************************************************")
+                runTime = 0.0
+                for i in range(1, nreps+1):
+                    ps = new(algoToRun, num=procs)
+                    for p in ps: setup(p, (ps-{p}, reqs))
+                    startTime = timeit.default_timer()
+                    start(ps)
+                    await(each(proc in ps, has=received(('done', proc))))
+                    runTime = runTime + (timeit.default_timer() - startTime)
+                    send(('done',), to= ps)
+                    print (algo, ":: Run Seq:: ", i, " Completed!!")
+                
+                runTime = runTime/nreps
+                with open('Performance_varyingProcs.csv', mode='a') as perf1_file:
+                    writer = csv.writer(perf1_file)
+                    writer.writerow([runSeq, procs, runTime])
+
+                runSeq = runSeq + 1
+
+        print("*******************PERFORMANCE VALIDATION ENDS**********************")
+
+    output("----------------------Main Ends-----------------------")
+
+# This is an executable specification of the algorithm described in
+# Lamport, L. (1978). "Time, clocks, and the ordering of events in a
+# distributed system".  Communications of the ACM, 21(7):558-565.
+
+# This code includes setup and termination for serving a given number of
+# requests per process.
+
+# All labels are not needed,
+# leaving 14 or 15 lines total for the algorithm body and message handlers.
