@@ -19,7 +19,7 @@ You may implement everything yourself or use implementations by others so long a
 
 Your program:
 
-Your program must run under Python 3.6.5 and DistAlgo 1.1.0b12 (can just do "pip install --pre pyDistAlgo" if you have pip installed, or download a file from http://distalgo.cs.stonybrook.edu/download, and follow README).
+Your program must run under Python 3.6.5 and DistAlgo 1.1.0b12 (can just do "pip install --pre pyDistAlgo" if you have pip installed.
 
 Your main program must be named
 "main.da", and must run with a command like the following, where 
